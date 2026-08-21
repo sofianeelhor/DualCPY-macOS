@@ -19,6 +19,7 @@
 
 import re
 import sys
+import time
 import logging
 import customtkinter as ctk
 
@@ -33,7 +34,7 @@ from src.ui_constants import (
 logger = logging.getLogger(__name__)
 
 # Connection defaults
-DEFAULT_CONNECT_PORT = "5555"
+DEFAULT_CONNECT_PORT = ""
 
 # Dialog window dimensions
 DIALOG_WIDTH = 600
@@ -179,6 +180,19 @@ class WirelessConnectionDialog:
             font=make_font(13),
         )
         self.connect_btn.pack(pady=(8, 12))
+
+        self.discover_btn = ctk.CTkButton(
+            scroll,
+            text="Find Thor Automatically",
+            command=self._on_discover,
+            fg_color=PANEL_COLOUR,
+            hover_color=BORDER_COLOUR,
+            border_color=BORDER_COLOUR,
+            border_width=1,
+            text_color=TEXT_COLOUR,
+            font=make_font(13),
+        )
+        self.discover_btn.pack(pady=(0, 12))
 
         self._separator(scroll)
 
@@ -397,6 +411,41 @@ class WirelessConnectionDialog:
         return all(0 <= int(p) <= 255 for p in ip.split("."))
 
     # Button callbacks
+    def _discover_connect_endpoint(self, ip=None):
+        services = self.scrcpy_manager.discover_wireless_services()
+        endpoints = [item for item in services if item["service"] == "connect"]
+        if ip:
+            matching = [item for item in endpoints if item["ip"] == ip]
+            if matching:
+                return matching[0]
+        return endpoints[0] if endpoints else None
+
+    def _on_discover(self):
+        """Discover Android 11+ Wireless Debugging's changing connect port."""
+        self.discover_btn.configure(state="disabled", text="Searching…")
+        self.dialog.update()
+        try:
+            preferred_ip = self.ip_entry.get().strip() or self.pair_address_entry.get().strip()
+            endpoint = self._discover_connect_endpoint(preferred_ip or None)
+            if not endpoint:
+                self._msgbox_error(
+                    "Thor Not Found",
+                    "No Wireless Debugging connection service was discovered.\n\n"
+                    "Check that the Mac and Thor are on the same Wi-Fi network, "
+                    "Wireless Debugging is enabled, and the Thor screen is awake.\n\n"
+                    "You can still enter the IP and connection port manually.",
+                )
+                return
+            self._set_entry(self.ip_entry, endpoint["ip"])
+            self._set_entry(self.port_entry, str(endpoint["port"]))
+            self._msgbox_info(
+                "Thor Found",
+                f"Found Wireless Debugging at {endpoint['ip']}:{endpoint['port']}.\n\n"
+                "Click Connect Now to start both screens.",
+            )
+        finally:
+            self.discover_btn.configure(state="normal", text="Find Thor Automatically")
+
     def _on_connect(self):
         """Validate fields and attempt a wireless ADB connection by IP."""
         ip   = self.ip_entry.get().strip()
@@ -419,7 +468,8 @@ class WirelessConnectionDialog:
             self._msgbox_error(
                 "Invalid Port",
                 "Please enter a valid port number between 1 and 65535.\n\n"
-                "The default port is usually 5555.",
+                "Use the port on the main Wireless Debugging page, or click "
+                "Find Thor Automatically. The pairing port is different.",
             )
             return
 
@@ -428,19 +478,10 @@ class WirelessConnectionDialog:
         self.connect_btn.configure(state="disabled", text="Connecting…")
         self.dialog.update()
 
+        success = False
         try:
             success = self.scrcpy_manager.connect_wireless(ip, port_num)
-            if success:
-                self._msgbox_info(
-                    "Connection Successful",
-                    f"Successfully connected to {ip}:{port}\n\n"
-                    "You can now close the Wireless Connection Window and start using DualCPY wirelessly!\n"
-                    "You may have to restart DualCPY for changes to take effect.\n"
-                    "If the DualCPY main window doesn't open check it's not open in the background!",
-                )
-                self.result = "connected"
-                self._update_status()
-            else:
+            if not success:
                 self._msgbox_error(
                     "Connection Failed",
                     f"Could not connect to {ip}:{port}\n\n"
@@ -453,6 +494,17 @@ class WirelessConnectionDialog:
                 )
         finally:
             self.connect_btn.configure(state="normal", text="Connect Now")
+
+        if success:
+            self.result = "connected"
+            self._update_status()
+            self._save_inputs()
+            self._msgbox_info(
+                "Connection Successful",
+                f"Connected and authorized at {ip}:{port}.\n\n"
+                "DualCPY will now close this dialog and start both screens.",
+            )
+            self._on_close()
 
     def _on_pair(self):
         """Validate fields and attempt ADB wireless pairing using a 6-digit code."""
@@ -496,19 +548,35 @@ class WirelessConnectionDialog:
         self.pair_btn.configure(state="disabled", text="Pairing…")
         self.dialog.update()
 
+        connected_endpoint = None
         try:
             success = self.scrcpy_manager.pair_wireless(ip, port_num, pairing_code)
             if success:
-                self._msgbox_info(
-                    "Pairing Successful",
-                    f"Successfully paired with {address}!\n\n"
-                    "Next Step:\n"
-                    "Use the 'Quick Connect' section above to connect.\n\n"
-                    "Use the IP address and port shown in the main\n"
-                    "'Wireless Debugging' settings (NOT the pairing screen).",
-                )
                 self._set_entry(self.ip_entry, ip)
                 self._set_entry(self.pair_code_entry, "")
+                # The connect service usually appears over mDNS shortly after
+                # pairing. Poll briefly and complete the whole flow when found.
+                for attempt in range(5):
+                    connected_endpoint = self._discover_connect_endpoint(ip)
+                    if connected_endpoint:
+                        break
+                    if attempt < 4:
+                        time.sleep(0.5)
+                if connected_endpoint:
+                    self._set_entry(self.port_entry, str(connected_endpoint["port"]))
+                    if not self.scrcpy_manager.connect_wireless(
+                        connected_endpoint["ip"], connected_endpoint["port"]
+                    ):
+                        connected_endpoint = None
+
+                if not connected_endpoint:
+                    self._msgbox_info(
+                        "Pairing Successful",
+                        f"Successfully paired with {address}.\n\n"
+                        "Now click Find Thor Automatically, or enter the IP and "
+                        "connection port from the main Wireless Debugging page. "
+                        "Do not reuse the pairing port.",
+                    )
             else:
                 self._msgbox_error(
                     "Pairing Failed",
@@ -523,6 +591,18 @@ class WirelessConnectionDialog:
                 )
         finally:
             self.pair_btn.configure(state="normal", text="Pair Device")
+
+        if connected_endpoint:
+            self.result = "connected"
+            self._update_status()
+            self._save_inputs()
+            self._msgbox_info(
+                "Paired and Connected",
+                f"Wireless ADB is ready at {connected_endpoint['ip']}:"
+                f"{connected_endpoint['port']}.\n\n"
+                "DualCPY will now start both screens.",
+            )
+            self._on_close()
 
     def _on_disconnect(self):
         """Prompt the user to confirm, then disconnect the active wireless device."""

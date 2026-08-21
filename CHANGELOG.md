@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.0.3 - 2026-08-21
+
+- Reworked Android 11+ wireless setup around separate pairing and connection
+  ports.
+- Added ADB mDNS discovery with a **Find Thor Automatically** action.
+- Pairing now passes the six-digit code non-interactively, discovers the live
+  connection endpoint, verifies its authorized `device` state, closes the
+  setup dialog, and immediately starts both streams.
+- Removed the misleading `5555` default from modern Wireless Debugging; manual
+  entry now clearly asks for the main-page connection port, not the pairing
+  port.
+
 ## 1.0.2 - 2026-08-21
 
 - Added a rotating main application log and an **Open Logs** button in the

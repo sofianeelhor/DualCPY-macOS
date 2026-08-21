@@ -16,6 +16,54 @@ class MacOSDockManagerTests(unittest.TestCase):
 
 class ScrcpyMacArgumentsTests(unittest.TestCase):
     @mock.patch("src.scrcpy_manager.subprocess.run")
+    def test_mdns_discovery_parses_android_wireless_services(self, run):
+        run.return_value = mock.Mock(
+            stdout=(
+                "List of discovered mdns services\n"
+                "adb-thor-pair  _adb-tls-pairing._tcp  192.168.1.42:37123\n"
+                "adb-thor-live  _adb-tls-connect._tcp  192.168.1.42:38901\n"
+            ),
+            stderr="",
+            returncode=0,
+        )
+        manager = ScrcpyManager(adb_bin="/opt/homebrew/bin/adb")
+
+        services = manager.discover_wireless_services()
+
+        self.assertEqual(len(services), 2)
+        self.assertEqual(services[1]["service"], "connect")
+        self.assertEqual(services[1]["ip"], "192.168.1.42")
+        self.assertEqual(services[1]["port"], 38901)
+
+    @mock.patch("src.scrcpy_manager.subprocess.run")
+    def test_pairing_passes_code_without_interactive_prompt(self, run):
+        run.return_value = mock.Mock(
+            stdout="Successfully paired to 192.168.1.42:37123\n",
+            stderr="",
+            returncode=0,
+        )
+        manager = ScrcpyManager(adb_bin="/opt/homebrew/bin/adb")
+
+        self.assertTrue(manager.pair_wireless("192.168.1.42", 37123, "123456"))
+        self.assertEqual(
+            run.call_args.args[0],
+            ["/opt/homebrew/bin/adb", "pair", "192.168.1.42:37123", "123456"],
+        )
+
+    @mock.patch("src.scrcpy_manager.subprocess.run")
+    def test_wireless_connect_verifies_authorized_device_state(self, run):
+        run.side_effect = [
+            mock.Mock(stdout="connected to 192.168.1.42:38901\n", stderr="", returncode=0),
+            mock.Mock(stdout="device\n", stderr="", returncode=0),
+        ]
+        manager = ScrcpyManager(adb_bin="/opt/homebrew/bin/adb")
+
+        self.assertTrue(manager.connect_wireless("192.168.1.42", 38901))
+        self.assertEqual(manager.serial, "192.168.1.42:38901")
+        self.assertEqual(manager.connection_mode, "wireless")
+        self.assertEqual(manager.device_status, "authorized")
+
+    @mock.patch("src.scrcpy_manager.subprocess.run")
     def test_display_probe_passes_homebrew_adb_to_scrcpy(self, run):
         run.return_value = mock.Mock(
             stdout="--display-id=0 (1920x1080)\n--display-id=4 (1240x1080)\n",

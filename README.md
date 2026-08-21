@@ -66,6 +66,24 @@ The packaged executable also supports `--version` and `--doctor` from Terminal.
 
 Open **System Settings → Privacy & Security** to change either permission.
 
+## Wireless connection
+
+The Mac and Thor must be on the same Wi-Fi network. On the Thor, enable
+**Developer options → Wireless debugging**.
+
+1. In DualCPY, click **Wireless**.
+2. The first time, open **Pair device with pairing code** on the Thor and enter
+   that screen's IP address, pairing port, and six-digit code.
+3. DualCPY will try to discover the separate connection port and start both
+   screens automatically.
+4. If discovery is blocked by the network, click **Find Thor Automatically** or
+   manually enter the IP and port from the main Wireless debugging page. Do not
+   reuse the temporary pairing port.
+
+Android normally remembers the Mac after the first pairing. See Google's
+[ADB Wi-Fi instructions](https://developer.android.com/tools/adb#connect-to-a-device-over-wi-fi)
+for the underlying Android requirements.
+
 ## Streaming with OBS
 
 Add two **Window Capture** sources and select `DualCPY Top Screen` and

@@ -59,6 +59,7 @@ ADB_SERVER_TIMEOUT = 10
 ADB_TASKKILL_TIMEOUT = 5
 ADB_CONNECT_TIMEOUT = 10
 ADB_TCPIP_TIMEOUT = 5
+ADB_MDNS_TIMEOUT = 5
 # How many times to (re)start the adb server before giving up on detection.
 # On a flaky server a kill-server + start-server between attempts clears stuck state.
 ADB_SERVER_START_RETRIES = 2
@@ -452,7 +453,10 @@ class ScrcpyManager:
         """
         if not serial:
             return False
-        return ':' in serial and re.match(r'\d+\.\d+\.\d+\.\d+:\d+', serial) is not None
+        return (
+            re.fullmatch(r'\d+\.\d+\.\d+\.\d+:\d+', serial) is not None
+            or "_adb-tls-connect._tcp" in serial
+        )
 
     def detect_device(self):
         """
@@ -614,14 +618,38 @@ class ScrcpyManager:
             if result.stderr:
                 logger.debug(f"adb connect stderr: {result.stderr}")
 
-            if result.returncode == 0 and ("connected" in result.stdout.lower() or "already connected" in result.stdout.lower()):
-                self.serial = target
-                self.connection_mode = 'wireless'
-                logger.debug(f"Successfully connected to {target}")
-                return True
-            else:
-                logger.warning(f"Failed to connect to {target}: {result.stdout}")
+            connected = result.returncode == 0 and (
+                "connected" in result.stdout.lower()
+                or "already connected" in result.stdout.lower()
+            )
+            if not connected:
+                logger.warning(
+                    "Failed to connect to %s: %s",
+                    target,
+                    ((result.stdout or "") + (result.stderr or "")).strip(),
+                )
                 return False
+
+            # `adb connect` may report success for a stale/offline endpoint.
+            # Verify that this exact endpoint is authorized before starting scrcpy.
+            for attempt in range(1, 4):
+                state = subprocess.run(
+                    [self.adb_bin, "-s", target, "get-state"],
+                    capture_output=True,
+                    text=True,
+                    timeout=ADB_CONNECT_TIMEOUT,
+                )
+                if state.returncode == 0 and state.stdout.strip() == "device":
+                    self.serial = target
+                    self.connection_mode = "wireless"
+                    self.device_status = "authorized"
+                    logger.info("Wireless ADB connection verified: %s", target)
+                    return True
+                if attempt < 3:
+                    time.sleep(0.4)
+
+            logger.warning("Wireless endpoint connected but never became ready: %s", target)
+            return False
 
         except subprocess.TimeoutExpired:
             logger.error(f"Wireless connection to {target} timed out")
@@ -650,38 +678,71 @@ class ScrcpyManager:
         logger.debug(f"Attempting wireless pairing with {target}")
 
         try:
-            # Start the pair process
-            process = subprocess.Popen(
-                [self.adb_bin, "pair", target],
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True
+            # adb accepts the code as a separate argument. This is more reliable
+            # in a Finder-launched GUI than waiting for an interactive prompt.
+            result = subprocess.run(
+                [self.adb_bin, "pair", target, pairing_code],
+                capture_output=True,
+                text=True,
+                timeout=ADB_CONNECT_TIMEOUT,
             )
-
-            # Send the pairing code
-            output, _ = process.communicate(input=f"{pairing_code}\n", timeout=ADB_CONNECT_TIMEOUT)
-
-            logger.debug(f"adb pair output: {output}")
-
-            if process.returncode == 0 and ("successfully paired" in output.lower() or "paired" in output.lower()):
-                logger.debug(f"Successfully paired with {target}")
+            output = (result.stdout or "") + (result.stderr or "")
+            if result.returncode == 0 and "paired" in output.lower():
+                logger.info("Wireless pairing succeeded: %s", target)
                 return True
-            else:
-                logger.warning(f"Pairing failed: {output}")
-                return False
+            logger.warning("Wireless pairing failed for %s: %s", target, output.strip())
+            return False
 
         except subprocess.TimeoutExpired:
             logger.error(f"Wireless pairing with {target} timed out")
-            try:
-                process.kill()
-                process.wait(timeout=5)
-            except Exception:
-                pass
             return False
         except Exception as e:
             logger.error(f"Error during wireless pairing: {e}", exc_info=True)
             return False
+
+    def discover_wireless_services(self):
+        """Return Android Wireless Debugging endpoints advertised over ADB mDNS.
+
+        Each item contains ``name``, ``service`` (``pairing`` or ``connect``),
+        ``ip`` and ``port``. An empty list is a normal fallback on networks that
+        block multicast discovery.
+        """
+        if not self.adb_bin:
+            logger.error("Cannot discover wireless devices: ADB binary not found")
+            return []
+
+        try:
+            result = subprocess.run(
+                [self.adb_bin, "mdns", "services"],
+                capture_output=True,
+                text=True,
+                timeout=ADB_MDNS_TIMEOUT,
+            )
+            output = (result.stdout or "") + (result.stderr or "")
+            services = []
+            pattern = re.compile(
+                r"^(?P<name>\S+)\s+_adb-tls-(?P<service>pairing|connect)\._tcp\.?\s+"
+                r"(?P<ip>\d{1,3}(?:\.\d{1,3}){3}):(?P<port>\d+)$"
+            )
+            for raw_line in output.splitlines():
+                match = pattern.match(raw_line.strip())
+                if not match:
+                    continue
+                item = match.groupdict()
+                item["port"] = int(item["port"])
+                services.append(item)
+            logger.info(
+                "ADB mDNS discovered %s Wireless Debugging service(s): %s",
+                len(services),
+                [f"{item['service']}@{item['ip']}:{item['port']}" for item in services],
+            )
+            return services
+        except subprocess.TimeoutExpired:
+            logger.warning("ADB mDNS discovery timed out")
+            return []
+        except Exception as exc:
+            logger.warning("ADB mDNS discovery failed: %s", exc)
+            return []
 
     def disconnect_wireless(self, target=None):
         """
