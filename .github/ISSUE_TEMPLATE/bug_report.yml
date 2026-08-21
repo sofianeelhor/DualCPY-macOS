@@ -1,0 +1,43 @@
+name: Bug report
+description: Report a reproducible DualCPY macOS problem
+title: "[Bug]: "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: Run `.venv/bin/python doctor.py` and redact serials/IP addresses before posting.
+  - type: input
+    id: macos
+    attributes:
+      label: macOS version and Mac model
+    validations:
+      required: true
+  - type: input
+    id: device
+    attributes:
+      label: Android handheld and Android version
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: What happened?
+      description: Include the exact steps and what you expected instead.
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Redacted doctor output and relevant logs
+      render: text
+    validations:
+      required: true
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checklist
+      options:
+        - label: I removed device serials, IP addresses, pairing codes, and personal paths.
+          required: true
+        - label: I searched existing issues for this problem.
+          required: true

@@ -1,0 +1,68 @@
+import unittest
+from unittest import mock
+
+from src.device_profile import BUILTIN_PROFILES
+from src.docking.macos import MacOSDockManager
+from src.scrcpy_manager import ScrcpyManager
+
+
+class MacOSDockManagerTests(unittest.TestCase):
+    def test_capture_geometry_tracks_arranged_canvas(self):
+        manager = MacOSDockManager()
+        self.assertEqual(manager.create_container(100, 100, 1152, 1214), 1)
+        manager.sync_layout(0, 0, 251, 648, 1152, 648, 650, 566)
+        self.assertEqual(manager.get_container_geometry(), (100, 100, 1152, 1214))
+
+
+class ScrcpyMacArgumentsTests(unittest.TestCase):
+    def test_unauthorized_device_does_not_restart_adb(self):
+        manager = ScrcpyManager(
+            scrcpy_bin="/opt/homebrew/bin/scrcpy",
+            adb_bin="/opt/homebrew/bin/adb",
+        )
+        manager._start_adb_server = mock.Mock()
+        manager._kill_adb_server = mock.Mock()
+
+        def unauthorized():
+            manager.device_status = "unauthorized"
+            return None
+
+        manager._query_first_device = mock.Mock(side_effect=unauthorized)
+        self.assertIsNone(manager.detect_device())
+        manager._kill_adb_server.assert_not_called()
+
+    @mock.patch("src.scrcpy_manager.time.sleep", return_value=None)
+    @mock.patch("src.scrcpy_manager.sys.platform", "darwin")
+    def test_dual_thor_windows_have_native_initial_positions(self, _sleep):
+        manager = ScrcpyManager(
+            scale=0.6,
+            scrcpy_bin="/opt/homebrew/bin/scrcpy",
+            adb_bin="/opt/homebrew/bin/adb",
+            profile=BUILTIN_PROFILES["ayn_thor"],
+        )
+        manager.get_displays = mock.Mock(return_value=["0", "4"])
+        commands = []
+
+        def capture(command, label, env=None):
+            commands.append((label, command))
+            return mock.Mock(pid=len(commands), poll=lambda: None)
+
+        manager._start_with_retry = capture
+        processes = manager.start_scrcpy("thor-serial")
+
+        self.assertEqual(len(processes), 2)
+        top = commands[0][1]
+        bottom = commands[1][1]
+        self.assertNotIn("--render-driver", top)
+        self.assertEqual(top[top.index("--display-id") + 1], "0")
+        self.assertEqual(bottom[bottom.index("--display-id") + 1], "4")
+        self.assertEqual(top[top.index("--window-x") + 1], "100")
+        self.assertEqual(top[top.index("--window-y") + 1], "100")
+        self.assertIn("--audio-codec=flac", top)
+        self.assertIn("--audio-buffer=100", top)
+        self.assertIn("--no-audio", bottom)
+        self.assertEqual(bottom[bottom.index("--window-y") + 1], str(100 + manager.f_h1))
+
+
+if __name__ == "__main__":
+    unittest.main()

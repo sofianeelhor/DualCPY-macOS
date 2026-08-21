@@ -1,0 +1,72 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build-release:
+    runs-on: macos-15
+    timeout-minutes: 30
+    env:
+      MACOS_CERTIFICATE_P12: ${{ secrets.MACOS_CERTIFICATE_P12 }}
+      MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+      MACOS_SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+          cache: pip
+
+      - name: Install and test
+        run: |
+          python -m pip install -r requirements.txt
+          python -m compileall -q main.py doctor.py src tests
+          python -m unittest discover -s tests -p 'test_*.py' -v
+          python main.py --version | grep -Eq '^DualCPY macOS [0-9]+\.[0-9]+\.[0-9]+$'
+          python build.py
+
+      - name: Import Developer ID certificate
+        if: env.MACOS_CERTIFICATE_P12 != ''
+        env:
+          KEYCHAIN_PASSWORD: ${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          certificate_path="$RUNNER_TEMP/dualcpy-certificate.p12"
+          keychain_path="$RUNNER_TEMP/dualcpy-signing.keychain-db"
+          print -r -- "$MACOS_CERTIFICATE_P12" | base64 --decode > "$certificate_path"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$keychain_path"
+          security set-keychain-settings -lut 21600 "$keychain_path"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$keychain_path"
+          security import "$certificate_path" -P "$MACOS_CERTIFICATE_PASSWORD" \
+            -A -t cert -f pkcs12 -k "$keychain_path"
+          security set-key-partition-list -S apple-tool:,apple: -k "$KEYCHAIN_PASSWORD" "$keychain_path"
+          security list-keychain -d user -s "$keychain_path" login.keychain-db
+
+      - name: Sign and notarize
+        if: env.MACOS_CERTIFICATE_P12 != ''
+        run: ./scripts/sign_and_notarize.sh
+
+      - name: Package unsigned fallback
+        if: env.MACOS_CERTIFICATE_P12 == ''
+        run: ./scripts/package_release.sh unsigned
+
+      - name: Create or update GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" release/* --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" release/* \
+              --generate-notes --title "DualCPY macOS $GITHUB_REF_NAME"
+          fi
