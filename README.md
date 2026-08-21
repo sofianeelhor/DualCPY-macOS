@@ -83,6 +83,11 @@ streaming software and retain full mouse, keyboard, audio, and gamepad input.
 
 ## Troubleshooting
 
+The Control Center shows startup/connection failures at the top. Click
+**Open Logs** to open `~/Library/Application Support/DualCPY/logs`, then attach
+`dualcpy.log` and the newest `scrcpy_top_*.log` / `scrcpy_bottom_*.log` to a bug
+report. Redact device serials and IP addresses before posting them publicly.
+
 - **`unauthorized` in `adb devices`:** unlock the Thor and accept its USB
   debugging prompt. If no prompt appears, revoke USB debugging authorizations,
   reconnect, and try again.

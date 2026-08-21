@@ -22,6 +22,7 @@ import sys
 import time
 import queue
 import logging
+import subprocess
 import tkinter as tk
 import customtkinter as ctk
 from PIL import Image
@@ -240,6 +241,18 @@ class CTkUI:
             text_color=TEXT_COLOUR,
         ).pack(side="left", padx=10)
 
+        # Persistent, prominent connection/diagnostic banner. Startup failures
+        # used to be hidden in Terminal output that Finder users never saw.
+        self._status_label = ctk.CTkLabel(
+            self._scroll,
+            text="Starting…",
+            font=make_font(12),
+            text_color=TEXT_COLOUR,
+            wraplength=400,
+            justify="left",
+        )
+        self._status_label.pack(fill="x", padx=16, pady=(2, 8))
+
         self._separator()
 
         self._section("Screen Layout")
@@ -397,6 +410,18 @@ class CTkUI:
             font=make_font(13),
         ).pack(fill="x", padx=16, pady=(4, 0))
 
+        ctk.CTkButton(
+            self._scroll,
+            text="Open Logs",
+            command=self._on_open_logs,
+            fg_color=PANEL_COLOUR,
+            hover_color=BORDER_COLOUR,
+            border_color=BORDER_COLOUR,
+            border_width=1,
+            text_color=TEXT_COLOUR,
+            font=make_font(13),
+        ).pack(fill="x", padx=16, pady=(8, 4))
+
         # Determine the display name of the initial loaded profile
         current_prof = self.l.scrcpy.profile
         display_name = current_prof.nickname.strip() if getattr(current_prof, "nickname", "") else current_prof.name
@@ -409,16 +434,6 @@ class CTkUI:
             text_color="#1a6b3a"
         )
         self._current_profile_label.pack(pady=(10, 5))
-
-        # FPS restart warning / status label
-        self._status_label = ctk.CTkLabel(
-            self._scroll,
-            text="",
-            font=make_font(12),
-            text_color=TEXT_COLOUR,
-        )
-
-        self._status_label.pack(pady=(2, 2))
 
         ctk.CTkFrame(
             self._scroll, height=1, fg_color=BORDER_COLOUR
@@ -696,6 +711,23 @@ class CTkUI:
             logger.error(f"File transfer window failed to open: {e}", exc_info=True)
             self.show_status("File browser failed to open", "error")
 
+    def _on_open_logs(self):
+        """Open the writable diagnostics folder in the platform file manager."""
+        logs_dir = os.path.abspath("logs")
+        os.makedirs(logs_dir, exist_ok=True)
+        try:
+            if sys.platform == "darwin":
+                subprocess.run(["open", logs_dir], check=True)
+            elif sys.platform == "win32":
+                os.startfile(logs_dir)
+            else:
+                subprocess.run(["xdg-open", logs_dir], check=True)
+            self.show_status("Logs folder opened", "success")
+        except Exception as exc:
+            logger.error("Could not open logs folder: %s", exc, exc_info=True)
+            set_clipboard_text(self.window, logs_dir)
+            self.show_status("Logs path copied to clipboard", "warning", 10.0)
+
     def _on_save_preset(self):
         name = self._preset_name_var.get().strip()
         try:
@@ -833,11 +865,6 @@ class CTkUI:
         def _apply():
             self.status_msg = msg
             self.status_type = status_type
-            # Re-show the label in case a previous timer hid it.
-            try:
-                self._status_label.pack(pady=(2, 2))
-            except Exception:
-                pass
             self._status_label.configure(
                 text=msg,
                 text_color=colour_map.get(status_type, TEXT_COLOUR),
@@ -850,7 +877,6 @@ class CTkUI:
 
             def _clear_status():
                 self._status_label.configure(text="")
-                self._status_label.pack_forget()
 
             self._status_after_id = self.window.after(int(duration * 1000), _clear_status)
 

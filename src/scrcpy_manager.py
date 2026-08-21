@@ -118,6 +118,9 @@ AUDIO_LOOPBACK_LATENCY_MS = 100
 
 # Timing delays for process management
 DISPLAY_INIT_DELAY = 1.2  # Wait for first display to initialize
+DISPLAY_QUERY_RETRIES = 3
+DISPLAY_QUERY_RETRY_DELAY = 0.4
+DISPLAY_QUERY_TIMEOUT = 5
 SCRCPY_CREATION_DELAY = 0.3  # Check if process survives startup
 SCRCPY_RETRY_DELAY = 0.7  # Wait between retry attempts
 
@@ -818,45 +821,68 @@ class ScrcpyManager:
         if not self.scrcpy_bin:
             return []
 
-        try:
-            cmd = [self.scrcpy_bin, "-s", serial, "--list-displays"]
-            logger.debug(f"Querying displays: {' '.join(cmd)}")
-            # Finder-launched macOS apps do not inherit Homebrew's PATH.
-            # scrcpy invokes adb internally for --list-displays, so give this
-            # probe the same explicit ADB environment as the video processes.
-            probe_env = os.environ.copy()
-            if self.adb_bin:
-                adb_path = os.path.abspath(self.adb_bin)
-                adb_dir = os.path.dirname(adb_path)
-                probe_env["ADB"] = adb_path
-                probe_env["PATH"] = os.pathsep.join(
-                    part for part in (adb_dir, probe_env.get("PATH", "")) if part
-                )
-            # scrcpy output is often on stderr or stdout depending on version
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=5,
-                env=probe_env,
+        cmd = [self.scrcpy_bin, "-s", serial, "--list-displays"]
+        probe_env = os.environ.copy()
+        if self.adb_bin:
+            adb_path = os.path.abspath(self.adb_bin)
+            adb_dir = os.path.dirname(adb_path)
+            probe_env["ADB"] = adb_path
+            probe_env["PATH"] = os.pathsep.join(
+                part for part in (adb_dir, probe_env.get("PATH", "")) if part
             )
 
-            output = result.stdout + result.stderr
-            logger.debug(f"Display query output: {output}")
+        ids = set()
+        for attempt in range(1, DISPLAY_QUERY_RETRIES + 1):
+            try:
+                result = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=DISPLAY_QUERY_TIMEOUT,
+                    env=probe_env,
+                )
+                output = (result.stdout or "") + (result.stderr or "")
+                ids.update(re.findall(r"--display-id=(\d+)", output))
+                logger.info(
+                    "Display probe %s/%s returned code %s and IDs %s",
+                    attempt,
+                    DISPLAY_QUERY_RETRIES,
+                    result.returncode,
+                    sorted(ids, key=int),
+                )
+                if len(ids) >= 2:
+                    break
+            except Exception as exc:
+                logger.warning(
+                    "Display probe %s/%s failed: %s",
+                    attempt,
+                    DISPLAY_QUERY_RETRIES,
+                    exc,
+                )
+            if attempt < DISPLAY_QUERY_RETRIES:
+                time.sleep(DISPLAY_QUERY_RETRY_DELAY)
 
-            # Parse output looking for --display-id=X
-            # Example line: "--display-id=0 (1080x2400)"
-            import re
-            ids = re.findall(r"--display-id=(\d+)", output)
+        # scrcpy may briefly report only the main display while Android is
+        # switching display state. Ask Android directly before falling back to
+        # the selected dual-screen profile.
+        if len(ids) < 2 and self.adb_bin:
+            try:
+                result = subprocess.run(
+                    [self.adb_bin, "-s", serial, "shell", "dumpsys", "display"],
+                    capture_output=True,
+                    text=True,
+                    timeout=DISPLAY_QUERY_TIMEOUT,
+                )
+                dumpsys = result.stdout or ""
+                ids.update(re.findall(r"mDisplayId=(\d+)", dumpsys))
+                ids.update(re.findall(r"displayId=(\d+)", dumpsys))
+                logger.info("Android display fallback IDs: %s", sorted(ids, key=int))
+            except Exception as exc:
+                logger.warning("Android display fallback failed: %s", exc)
 
-            # Remove duplicates and sort
-            ids = sorted(list(set(ids)), key=int)
-            logger.info(f"Detected displays: {ids}")
-            return ids
-
-        except Exception as e:
-            logger.error(f"Failed to query displays: {e}")
-            return []
+        detected = sorted(ids, key=int)
+        logger.info("Final detected displays: %s", detected)
+        return detected
 
     def start_scrcpy(self, serial=None, extra_top_args=None, extra_bottom_args=None, swap_screens=False):
         """
@@ -895,10 +921,6 @@ class ScrcpyManager:
 
         # Detect displays dynamically
         displays = self.get_displays(self.serial)
-        if not displays:
-            logger.warning("No displays detected via --list-displays. Falling back to default ID 0.")
-            displays = ["0"]
-
         # Assign display IDs. Prefer the profile's configured IDs when both are
         # actually present on the device; otherwise fall back to positional
         # auto-detection from --list-displays.
@@ -907,16 +929,31 @@ class ScrcpyManager:
         if prof_top in displays and prof_bottom in displays:
             top_id, bottom_id = prof_top, prof_bottom
             logger.info(f"Using profile display IDs: top={top_id}, bottom={bottom_id}")
-        else:
+        elif len(displays) >= 2:
             top_id = displays[0]
-            bottom_id = displays[-1] if len(displays) > 1 else None
+            bottom_id = displays[-1]
+            logger.warning(
+                "Profile IDs %s/%s were not both detected; using discovered IDs %s/%s",
+                prof_top, prof_bottom, top_id, bottom_id,
+            )
+        elif prof_top != prof_bottom:
+            # AYN Thor display enumeration is occasionally transient. A dual
+            # profile is an explicit instruction to try both configured IDs.
+            top_id, bottom_id = prof_top, prof_bottom
+            logger.warning(
+                "Only %s detected; explicitly trying profile display IDs %s/%s",
+                displays or "no displays", top_id, bottom_id,
+            )
+        else:
+            top_id = displays[0] if displays else prof_top
+            bottom_id = None
 
         # flipped_screens (profile) combined with the user's swap toggle.
         if (bool(self.profile.flipped_screens) ^ bool(swap_screens)) and bottom_id is not None:
             logger.info("Swapping screen order (profile.flipped_screens / user swap).")
             top_id, bottom_id = bottom_id, top_id
 
-        if len(displays) == 1:
+        if len(displays) < 2:
              logger.warning("Only one display detected. Dual screen mode might not work as expected.")
 
         # Set up PipeWire audio routing: game audio → speakers + Discord auto-capture
@@ -1052,13 +1089,18 @@ class ScrcpyManager:
             # Start bottom screen
             logger.info(f"Starting BOTTOM window ({BOTTOM_SCREEN_WINDOW_TITLE}) on Display {bottom_id}")
             logger.debug(f"Bottom window command: {' '.join(bottom_args)}")
-            p1 = self._start_with_retry(bottom_args, "bottom", env=scrcpy_env)
+            try:
+                p1 = self._start_with_retry(bottom_args, "bottom", env=scrcpy_env)
+            except Exception as exc:
+                logger.error("Bottom display %s failed to start: %s", bottom_id, exc)
+                self.stop()
+                raise RuntimeError(f"Bottom display {bottom_id} failed: {exc}") from exc
 
             return [p for p in [p0, p1] if p]
 
         else:
-             logger.info("Skipping bottom window (only 1 display found or same ID)")
-             return [p0] if p0 else []
+             self.stop()
+             raise RuntimeError("No distinct bottom display ID is configured")
 
     def _start_with_retry(self, cmd, label, env=None):
         """
@@ -1141,8 +1183,19 @@ class ScrcpyManager:
                 # Verify process didn't instantly crash
                 time.sleep(SCRCPY_CREATION_DELAY)
                 if proc.poll() is not None:
+                    detail = ""
+                    if logfile is not None:
+                        try:
+                            logfile.flush()
+                            with open(logfile.name, "r", encoding=LOGFILE_ENCODING) as failed_log:
+                                lines = [line.strip() for line in failed_log.readlines() if line.strip()]
+                            if lines:
+                                detail = "; " + " | ".join(lines[-4:])
+                        except Exception:
+                            pass
                     raise RuntimeError(
-                        f"Scrcpy {label} process died immediately (exit code: {proc.poll()})"
+                        f"Scrcpy {label} process died immediately "
+                        f"(exit code: {proc.poll()}){detail}"
                     )
 
                 # Start process hidden

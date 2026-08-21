@@ -31,6 +31,66 @@ class ScrcpyMacArgumentsTests(unittest.TestCase):
         self.assertEqual(probe_env["ADB"], "/opt/homebrew/bin/adb")
         self.assertEqual(probe_env["PATH"].split(":", 1)[0], "/opt/homebrew/bin")
 
+    @mock.patch("src.scrcpy_manager.time.sleep", return_value=None)
+    @mock.patch("src.scrcpy_manager.subprocess.run")
+    def test_display_probe_falls_back_to_android_dumpsys(self, run, _sleep):
+        one_display = mock.Mock(
+            stdout="--display-id=0 (1920x1080)\n",
+            stderr="",
+            returncode=0,
+        )
+        dumpsys = mock.Mock(
+            stdout="mDisplayId=0\nDisplayViewport{displayId=4, deviceWidth=1240}",
+            stderr="",
+            returncode=0,
+        )
+        run.side_effect = [one_display, one_display, one_display, dumpsys]
+        manager = ScrcpyManager(
+            scrcpy_bin="/opt/homebrew/bin/scrcpy",
+            adb_bin="/opt/homebrew/bin/adb",
+        )
+
+        self.assertEqual(manager.get_displays("thor-serial"), ["0", "4"])
+
+    @mock.patch("src.scrcpy_manager.time.sleep", return_value=None)
+    def test_thor_profile_attempts_bottom_when_probe_is_transient(self, _sleep):
+        manager = ScrcpyManager(
+            scale=0.6,
+            scrcpy_bin="/opt/homebrew/bin/scrcpy",
+            adb_bin="/opt/homebrew/bin/adb",
+            profile=BUILTIN_PROFILES["ayn_thor"],
+        )
+        manager.get_displays = mock.Mock(return_value=["0"])
+        commands = []
+
+        def capture(command, label, env=None):
+            commands.append((label, command))
+            return mock.Mock(pid=len(commands), poll=lambda: None)
+
+        manager._start_with_retry = capture
+        processes = manager.start_scrcpy("thor-serial")
+
+        self.assertEqual(len(processes), 2)
+        self.assertEqual(commands[1][1][commands[1][1].index("--display-id") + 1], "4")
+
+    @mock.patch("src.scrcpy_manager.time.sleep", return_value=None)
+    def test_bottom_failure_cleans_up_partial_top_window(self, _sleep):
+        manager = ScrcpyManager(
+            scrcpy_bin="/opt/homebrew/bin/scrcpy",
+            adb_bin="/opt/homebrew/bin/adb",
+            profile=BUILTIN_PROFILES["ayn_thor"],
+        )
+        manager.get_displays = mock.Mock(return_value=["0", "4"])
+        top_process = mock.Mock(pid=1, poll=lambda: None)
+        manager._start_with_retry = mock.Mock(
+            side_effect=[top_process, RuntimeError("encoder unavailable")]
+        )
+        manager.stop = mock.Mock()
+
+        with self.assertRaisesRegex(RuntimeError, "Bottom display 4 failed"):
+            manager.start_scrcpy("thor-serial")
+        manager.stop.assert_called_once()
+
     def test_unauthorized_device_does_not_restart_adb(self):
         manager = ScrcpyManager(
             scrcpy_bin="/opt/homebrew/bin/scrcpy",

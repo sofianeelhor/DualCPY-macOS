@@ -78,15 +78,6 @@ DEFAULT_LAYOUT = {"tx": TOP_SCREEN_DEFAULT_X, "ty": TOP_SCREEN_DEFAULT_Y,
                   "bx": BOTTOM_SCREEN_DEFAULT_X, "by": BOTTOM_SCREEN_DEFAULT_Y,
                   "global_scale": DEFAULT_GLOBAL_SCALE}
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.StreamHandler(sys.stdout)
-    ]
-)
-
 class LayoutMode:
     DUAL = "DUAL"
     TOP = "TOP"
@@ -170,6 +161,9 @@ class Launcher:
         self._scan_thread = None
         self._quick_connecting = False
         self._quick_connect_thread = None
+        self.startup_status = None
+        self._last_health_check = 0.0
+        self._stream_error_reported = False
 
     def set_layout_mode(self, mode):
         """
@@ -478,7 +472,18 @@ class Launcher:
                     self.scrcpy.adb_bin = self.scrcpy._resolve_bin("adb")
                     self.scrcpy.scrcpy_bin = self.scrcpy._resolve_bin("scrcpy")
             if not self.scrcpy.adb_bin or not self.scrcpy.scrcpy_bin:
-                logger.error("Required binaries not found and automatic installation failed/not supported.")
+                missing = [
+                    name for name, path in (
+                        ("adb", self.scrcpy.adb_bin),
+                        ("scrcpy", self.scrcpy.scrcpy_bin),
+                    ) if not path
+                ]
+                logger.error("Required binaries not found: %s", ", ".join(missing))
+                self.startup_status = (
+                    "Missing dependency: " + ", ".join(missing) +
+                    ". Install Homebrew, then run: brew install android-platform-tools scrcpy",
+                    "error",
+                )
 
         # Try to detect device, but don't require it
         serial = self.scrcpy.detect_device()
@@ -495,8 +500,14 @@ class Launcher:
             self.bx = int(self.scrcpy.f_w1 * HALF - self.scrcpy.f_w2 * HALF)
 
             try:
-                self.scrcpy.start_scrcpy(serial, swap_screens=self.swap_screens)
+                processes = self.scrcpy.start_scrcpy(serial, swap_screens=self.swap_screens)
+                if len(processes) != 2:
+                    raise RuntimeError(
+                        f"Expected 2 scrcpy windows, but only {len(processes)} started"
+                    )
                 logger.info(f"Started scrcpy with device: {serial}")
+                self._stream_error_reported = False
+                self.startup_status = ("Connected: both Thor screens are running", "success")
 
                 self._create_container_window()
                 self._dock_monitor_stop.set()
@@ -504,25 +515,40 @@ class Launcher:
                 self._dock_monitor_stop.clear()
                 threading.Thread(target=self._docking_monitor, daemon=True).start()
             except Exception as StartError:
-                logger.error(f"Failed to start scrcpy: {StartError}")
+                logger.error(f"Failed to start scrcpy: {StartError}", exc_info=True)
+                self.scrcpy.stop()
+                self.startup_status = (
+                    f"Streaming failed: {StartError}. Click Open Logs for details.",
+                    "error",
+                )
         else:
             if self.scrcpy.device_status == "unauthorized":
                 logger.warning("Thor is connected but awaiting USB debugging authorization")
                 print("\n[INFO] Unlock the Thor and accept the USB debugging prompt, then click Restart.\n")
+                self.startup_status = (
+                    "Thor detected but not authorized. Unlock it, accept the USB debugging prompt, then click Restart.",
+                    "warning",
+                )
             else:
                 logger.info("No device detected at startup. User can connect via the Wireless dialog.")
                 print("\n[INFO] No device detected. Use the Wireless button in the UI to connect.\n")
+                if self.startup_status is None:
+                    self.startup_status = (
+                        "No Android device detected. Check the USB data cable and RSA prompt, or use Wireless.",
+                        "warning",
+                    )
 
         # Init the customtkinter control panel and run its event loop.
         try:
             from src.control_panel import CTkUI
             self.ui = CTkUI(self)
             self._tk_root = self.ui.window
-            if self.scrcpy.device_status == "unauthorized":
+            if self.startup_status:
+                message, status_type = self.startup_status
                 self.ui.show_status(
-                    "Unlock Thor, allow USB debugging, then click Restart",
-                    "warning",
-                    30.0,
+                    message,
+                    status_type,
+                    120.0 if status_type != "success" else 10.0,
                 )
         except Exception as e:
             logger.error(f"Failed to init control panel UI: {e}", exc_info=True)
@@ -618,6 +644,28 @@ class Launcher:
         self.dock.process_events()
         self._sync_now()
 
+        # Surface a cable/network drop instead of silently leaving one window.
+        now = time.monotonic()
+        if now - self._last_health_check >= 1.0:
+            self._last_health_check = now
+            dead = self.scrcpy._check_process_alive() if self.scrcpy.processes else None
+            if dead is not None and not self._stream_error_reported:
+                self._stream_error_reported = True
+                logger.error(
+                    "A scrcpy window stopped unexpectedly (pid=%s, exit=%s)",
+                    getattr(dead, "pid", "?"),
+                    dead.poll(),
+                )
+                self.scrcpy.stop()
+                self.docked = False
+                if hasattr(self, "ui") and self.ui:
+                    self.ui.show_status(
+                        "Streaming stopped: device disconnected or scrcpy failed. "
+                        "Reconnect it, click Restart, then Open Logs if it repeats.",
+                        "error",
+                        120.0,
+                    )
+
     def show_connection_dialog(self):
         """Open the customtkinter wireless dialog. Returns 'connected',
         'disconnected' or None."""
@@ -673,10 +721,15 @@ class Launcher:
 
                 # Start scrcpy
                 serial = self.scrcpy.serial
-                self.scrcpy.start_scrcpy(serial, swap_screens=self.swap_screens)
+                processes = self.scrcpy.start_scrcpy(serial, swap_screens=self.swap_screens)
+                if len(processes) != 2:
+                    raise RuntimeError(
+                        f"Expected 2 scrcpy windows, but only {len(processes)} started"
+                    )
 
                 # Re-enable docking and create a fresh container
                 self.docked = True
+                self._stream_error_reported = False
                 self._last_sync_params = None  # force sync_layout on next frame
                 self._create_container_window()
                 self._dock_monitor_stop.set()
@@ -688,9 +741,14 @@ class Launcher:
                     self.ui.show_status(f"Connected to {ip_port}", "success", 5.0)
 
             except Exception as e:
-                logger.error(f"Failed to start scrcpy: {e}")
+                logger.error(f"Failed to start scrcpy: {e}", exc_info=True)
+                self.scrcpy.stop()
                 if hasattr(self, 'ui') and self.ui:
-                    self.ui.show_status(f"Failed: {e}", "error", 5.0)
+                    self.ui.show_status(
+                        f"Wireless streaming failed: {e}. Click Open Logs.",
+                        "error",
+                        120.0,
+                    )
 
     def connect_wireless_async(self, ip, port, callback):
         """Run adb connect in a background thread. Calls callback(success, message)."""
@@ -790,8 +848,13 @@ class Launcher:
                             self._top_docked = False
                             self._bottom_docked = False
 
-                    self.scrcpy.start_scrcpy(serial, swap_screens=self.swap_screens)
+                    processes = self.scrcpy.start_scrcpy(serial, swap_screens=self.swap_screens)
+                    if len(processes) != 2:
+                        raise RuntimeError(
+                            f"Expected 2 scrcpy windows, but only {len(processes)} started"
+                        )
                     self.docked = True
+                    self._stream_error_reported = False
                     self._create_container_window()
                     self._dock_monitor_stop.set()
                     time.sleep(0.1)
@@ -801,9 +864,14 @@ class Launcher:
                     if hasattr(self, 'ui') and self.ui:
                         self.ui.show_status(f"Connected to {serial}!", "success", 5.0)
                 except Exception as e:
-                    logger.error(f"Failed to start scrcpy after quick connect: {e}")
+                    logger.error(f"Failed to start scrcpy after quick connect: {e}", exc_info=True)
+                    self.scrcpy.stop()
                     if hasattr(self, 'ui') and self.ui:
-                        self.ui.show_status(f"Connection OK but scrcpy failed: {e}", "error", 5.0)
+                        self.ui.show_status(
+                            f"Connection OK but streaming failed: {e}. Click Open Logs.",
+                            "error",
+                            120.0,
+                        )
             else:
                 logger.warning(f"Quick connect failed to {ip}:{port}")
                 if hasattr(self, 'ui') and self.ui:
@@ -927,15 +995,34 @@ class Launcher:
         if serial:
             try:
                 # Pass current swap_screens setting
-                self.scrcpy.start_scrcpy(serial, swap_screens=self.swap_screens)
+                processes = self.scrcpy.start_scrcpy(serial, swap_screens=self.swap_screens)
+                if len(processes) != 2:
+                    raise RuntimeError(
+                        f"Expected 2 scrcpy windows, but only {len(processes)} started"
+                    )
                 self.docked = True # Re-enable docking
+                self._stream_error_reported = False
                 self._last_sync_params = None
                 self._create_container_window()
+                if hasattr(self, "ui") and self.ui:
+                    self.ui.show_status("Connected: both Thor screens are running", "success", 8.0)
             except Exception as StartError:
-                logger.error(f"Failed to restart scrcpy: {StartError}")
-                # Try to recover or notify?
+                logger.error(f"Failed to restart scrcpy: {StartError}", exc_info=True)
+                self.scrcpy.stop()
+                if hasattr(self, "ui") and self.ui:
+                    self.ui.show_status(
+                        f"Streaming failed: {StartError}. Click Open Logs for details.",
+                        "error",
+                        120.0,
+                    )
         else:
             logger.error("No device found during restart")
+            if hasattr(self, "ui") and self.ui:
+                if self.scrcpy.device_status == "unauthorized":
+                    message = "Thor not authorized: accept the USB debugging prompt, then click Restart."
+                else:
+                    message = "No device detected. Check the USB data cable/RSA prompt or connect wirelessly."
+                self.ui.show_status(message, "warning", 120.0)
 
     def stop(self):
         """

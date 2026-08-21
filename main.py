@@ -17,7 +17,7 @@
 
 # main.py
 
-__version__ = "1.0.1"
+__version__ = "1.0.2"
 __app_name__ = "DualCPY macOS"
 __author__ = "DualCPY contributors"
 __description__ = "Dual-screen Android handheld mirroring for macOS"
@@ -25,6 +25,7 @@ __description__ = "Dual-screen Android handheld mirroring for macOS"
 import os
 import sys
 import logging
+from logging.handlers import RotatingFileHandler
 import time
 import platform
 import signal
@@ -59,13 +60,28 @@ def setup_logging():
     log_dir = os.path.abspath("logs")
     os.makedirs(log_dir, exist_ok=True)
 
-    log_file = os.path.join(log_dir, f"dualcpy_{time.strftime('%Y%m%d')}.log")
+    log_file = os.path.join(log_dir, "dualcpy.log")
+    formatter = logging.Formatter(
+        "%(asctime)s - %(levelname)s - %(name)s - %(message)s"
+    )
+    file_handler = RotatingFileHandler(
+        log_file,
+        maxBytes=2 * 1024 * 1024,
+        backupCount=3,
+        encoding="utf-8",
+    )
+    file_handler.setFormatter(formatter)
+    stream_handler = logging.StreamHandler()
+    stream_handler.setFormatter(formatter)
 
+    # Bundled dependencies may configure logging during import. force=True
+    # guarantees that Finder-launched builds still write this diagnostic file.
     logging.basicConfig(
         level=logging.INFO,
-        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-        handlers=[logging.FileHandler(log_file, encoding="utf-8"), logging.StreamHandler()],
+        handlers=[file_handler, stream_handler],
+        force=True,
     )
+    logging.captureWarnings(True)
 
 
 def check_windows_version():

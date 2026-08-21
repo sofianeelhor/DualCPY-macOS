@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.0.2 - 2026-08-21
+
+- Added a rotating main application log and an **Open Logs** button in the
+  Control Center.
+- Added clear UI diagnostics for missing dependencies, unauthorized/no device,
+  scrcpy startup errors, and USB/wireless disconnects.
+- Retried display enumeration, added an Android `dumpsys display` fallback, and
+  explicitly attempts both configured Thor displays (`0` and `4`) when the
+  initial probe is incomplete.
+- Made dual-screen startup atomic: a lower-screen failure is reported with the
+  relevant scrcpy log instead of silently leaving only the upper window.
+
 ## 1.0.1 - 2026-08-21
 
 - Fixed the packaged app detecting only display `0` when launched from Finder.
