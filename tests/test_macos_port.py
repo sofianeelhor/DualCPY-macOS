@@ -15,6 +15,22 @@ class MacOSDockManagerTests(unittest.TestCase):
 
 
 class ScrcpyMacArgumentsTests(unittest.TestCase):
+    @mock.patch("src.scrcpy_manager.subprocess.run")
+    def test_display_probe_passes_homebrew_adb_to_scrcpy(self, run):
+        run.return_value = mock.Mock(
+            stdout="--display-id=0 (1920x1080)\n--display-id=4 (1240x1080)\n",
+            stderr="",
+        )
+        manager = ScrcpyManager(
+            scrcpy_bin="/opt/homebrew/bin/scrcpy",
+            adb_bin="/opt/homebrew/bin/adb",
+        )
+
+        self.assertEqual(manager.get_displays("thor-serial"), ["0", "4"])
+        probe_env = run.call_args.kwargs["env"]
+        self.assertEqual(probe_env["ADB"], "/opt/homebrew/bin/adb")
+        self.assertEqual(probe_env["PATH"].split(":", 1)[0], "/opt/homebrew/bin")
+
     def test_unauthorized_device_does_not_restart_adb(self):
         manager = ScrcpyManager(
             scrcpy_bin="/opt/homebrew/bin/scrcpy",

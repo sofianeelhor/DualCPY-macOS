@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.0.1 - 2026-08-21
+
+- Fixed the packaged app detecting only display `0` when launched from Finder.
+  The display probe now receives Homebrew's absolute `adb` path, allowing the
+  AYN Thor bottom display (`4`) to launch correctly.
+
 ## macOS port - 2026-08-20
 
 - Added native macOS device/window handling with Homebrew binary discovery.

@@ -17,7 +17,7 @@
 
 # main.py
 
-__version__ = "1.0.0"
+__version__ = "1.0.1"
 __app_name__ = "DualCPY macOS"
 __author__ = "DualCPY contributors"
 __description__ = "Dual-screen Android handheld mirroring for macOS"

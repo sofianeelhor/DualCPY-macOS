@@ -821,8 +821,25 @@ class ScrcpyManager:
         try:
             cmd = [self.scrcpy_bin, "-s", serial, "--list-displays"]
             logger.debug(f"Querying displays: {' '.join(cmd)}")
+            # Finder-launched macOS apps do not inherit Homebrew's PATH.
+            # scrcpy invokes adb internally for --list-displays, so give this
+            # probe the same explicit ADB environment as the video processes.
+            probe_env = os.environ.copy()
+            if self.adb_bin:
+                adb_path = os.path.abspath(self.adb_bin)
+                adb_dir = os.path.dirname(adb_path)
+                probe_env["ADB"] = adb_path
+                probe_env["PATH"] = os.pathsep.join(
+                    part for part in (adb_dir, probe_env.get("PATH", "")) if part
+                )
             # scrcpy output is often on stderr or stdout depending on version
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=5,
+                env=probe_env,
+            )
 
             output = result.stdout + result.stderr
             logger.debug(f"Display query output: {output}")
