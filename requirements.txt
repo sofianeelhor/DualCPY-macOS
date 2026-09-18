@@ -4,6 +4,6 @@ customtkinter==6.0.0
 darkdetect==0.8.0
 pillow==12.3.0
 mss==10.2.0
-pyinstaller==6.22.2
+pyinstaller==6.22.3
 pyobjc-framework-Quartz==12.2.2; sys_platform == 'darwin'
 pyobjc-framework-ApplicationServices==12.2.2; sys_platform == 'darwin'
